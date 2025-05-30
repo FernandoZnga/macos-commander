@@ -1,0 +1,15 @@
+slack
+iterm2
+warp
+docker
+visual-studio-code
+sublime-text
+postman
+pritunl
+github
+google-chrome
+vivaldi
+firefox
+duckduckgo
+whatsapp
+

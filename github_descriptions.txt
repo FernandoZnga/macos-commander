@@ -1,0 +1,24 @@
+# GitHub Repository Information for macos-commander
+
+## Repository Title with Emoji:
+🖥️ macOS Commander
+
+## Tagline with Emoji (max 50 characters):
+⚡ Command your Mac's destiny with powerful automation
+
+## Description with Emoji (max 160 characters):
+🚀 A suite of shell scripts that automate macOS setup, teardown, and maintenance. 💻 Deploy developer environments in minutes and keep your system clean. ✨
+
+## GitHub Topics/Tags:
+macos, shell-script, automation, developer-tools, setup, homebrew, productivity, utilities, terminal, zsh, mac-setup, development-environment, system-maintenance, dotfiles, cli-tools
+
+## Website Category Classifications:
+- Primary: Development Tools
+- Secondary: Utilities
+- Tertiary: Productivity
+
+## Suggested Social Preview Image Themes:
+- Terminal with command execution
+- MacOS logo with terminal/tools iconography
+- Blueprint/schematic of Mac setup
+
