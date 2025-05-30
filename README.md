@@ -41,7 +41,7 @@ This repository contains a set of scripts designed to help with macOS system man
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/macos-commander.git
+   git clone https://github.com/FernandoZnga/macos-commander.git
    cd macos-commander
    ```
 
