@@ -126,19 +126,22 @@ if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
     hidden_file_count=$(find "$TARGET_DIR" -type f -name ".*" | wc -l | tr -d ' ')
     delete_candidate_count=$(find "$TARGET_DIR" -type f -mtime +3 | wc -l | tr -d ' ')
     
-    # Count empty folders older than 4 days that would be deleted (by creation date)
+    # Count folders older than 4 days that would be deleted (by creation date)
+    # Process folders from deepest to shallowest for hierarchical cleanup
     delete_folder_candidate_count=0
     while IFS= read -r dir; do
-        if [ -n "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+        if [ -n "$dir" ]; then
             # Check creation date using stat -f %B (birth time in seconds since epoch)
             folder_birth_time=$(stat -f "%B" "$dir" 2>/dev/null)
             current_time=$(date +%s)
             days_old=$(( (current_time - folder_birth_time) / 86400 ))
             if [ "$days_old" -gt 3 ]; then
+                # Count folders that are old enough, regardless of content initially
+                # The actual deletion will handle the hierarchical cleanup
                 ((delete_folder_candidate_count++))
             fi
         fi
-    done < <(find "$TARGET_DIR" -type d ! -path "$TARGET_DIR")
+    done < <(find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | sort -r)
 else
     # Same logic, excluding the root directory from folder count
     folder_count=$(find "$TARGET_DIR" -maxdepth 1 -type d ! -path "$TARGET_DIR" | wc -l | tr -d ' ')
@@ -216,61 +219,116 @@ echo "$FILE_LIST" | while IFS= read -r -d '' file; do
     echo ""
 done
 
-# Check empty folders in TEST mode (only if subfolders included)
+# Check folders that would be cleaned up in TEST mode (only if subfolders included)
 if [ $DELETE_MODE -eq 0 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
-    echo "Checking for empty folders that would be deleted..."
+    echo "Checking for folders that would be cleaned up..."
     
-    # Find all directories (excluding the root target directory)
-    find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | while IFS= read -r dir; do
-        # Check if directory is empty
-        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
-            # Get the directory's creation date (birth time)
-            dir_birth_date=$(stat -f "%SB" -t "%Y-%m-%d" "$dir" 2>/dev/null)
-            folder_birth_time=$(stat -f "%B" "$dir" 2>/dev/null)
-            current_time=$(date +%s)
-            days_old=$(( (current_time - folder_birth_time) / 86400 ))
+    # Show all old folders that would be processed
+    find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | awk '{print length($0), $0}' | sort -nr | cut -d' ' -f2- | while IFS= read -r dir; do
+        # Get the directory's creation date (birth time)
+        dir_birth_date=$(stat -f "%SB" -t "%Y-%m-%d" "$dir" 2>/dev/null)
+        folder_birth_time=$(stat -f "%B" "$dir" 2>/dev/null)
+        current_time=$(date +%s)
+        days_old=$(( (current_time - folder_birth_time) / 86400 ))
+        
+        # Check if directory is older than 4 days by creation date
+        if [ "$days_old" -gt 3 ]; then
+            # Determine what would happen to this folder
+            file_count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+            new_file_count=$(find "$dir" -maxdepth 1 -type f ! -mtime +3 | wc -l | tr -d ' ')
+            subdir_count=$(find "$dir" -maxdepth 1 -type d ! -path "$dir" | wc -l | tr -d ' ')
             
-            # Check if directory is older than 4 days by creation date
-            if [ "$days_old" -gt 3 ]; then
-                echo "Empty folder: $(basename "$dir") (created: $dir_birth_date)"
-                echo "  Status: Would be deleted (empty and created more than 4 days ago)"
-            else
-                echo "Empty folder: $(basename "$dir") (created: $dir_birth_date)"
-                echo "  Status: Would be kept (created within 4 days)"
+            echo "Folder: $(basename "$dir") (created: $dir_birth_date)"
+            echo "  Path: $dir"
+            
+            # Show folder contents for debugging
+            if [ "$file_count" -gt 0 ]; then
+                echo "  Files: $file_count (new: $new_file_count, old: $(( file_count - new_file_count )))"
             fi
+            if [ "$subdir_count" -gt 0 ]; then
+                echo "  Subdirectories: $subdir_count"
+            fi
+            
+            # Determine status
+            if [ "$subdir_count" -eq 0 ] && [ "$new_file_count" -eq 0 ]; then
+                if [ "$file_count" -eq 0 ]; then
+                    echo "  Status: Would be deleted (already empty)"
+                else
+                    echo "  Status: Would be deleted (contains only old files)"
+                fi
+            else
+                echo "  Status: Would be processed in hierarchical cleanup"
+            fi
+            echo ""
         fi
     done
 fi
 
-# Remove empty folders in DELETE mode (only if subfolders included)
+# Remove folders hierarchically in DELETE mode (only if subfolders included)
 if [ $DELETE_MODE -eq 1 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
-    echo "Checking for empty folders older than 4 days..."
+    echo "Performing hierarchical cleanup of old folders..."
     
-    # Find all directories (excluding the root target directory)
-    find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | while IFS= read -r dir; do
-        # Check if directory is empty
-        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
-            # Get the directory's creation date (birth time)
-            dir_birth_date=$(stat -f "%SB" -t "%Y-%m-%d" "$dir" 2>/dev/null)
-            folder_birth_time=$(stat -f "%B" "$dir" 2>/dev/null)
-            current_time=$(date +%s)
-            days_old=$(( (current_time - folder_birth_time) / 86400 ))
-            
-            # Check if directory is older than 4 days by creation date
-            if [ "$days_old" -gt 3 ]; then
-                echo "Empty folder: $(basename "$dir") (created: $dir_birth_date)"
-                if rmdir "$dir" 2>/dev/null; then
-                    echo "  Status: DELETED (empty and created more than 4 days ago)"
-                    ((deleted_folder_count++))
-                else
-                    echo "  Status: FAILED to delete (may not be empty or permission issue)"
+    # Multiple passes to clean up folders hierarchically
+    max_passes=10
+    pass=1
+    folders_deleted_this_pass=1
+    
+    while [ $folders_deleted_this_pass -gt 0 ] && [ $pass -le $max_passes ]; do
+        folders_deleted_this_pass=0
+        echo "Cleanup pass $pass..."
+        
+        # Process folders from deepest to shallowest (reverse sort by path length, then alphabetically)
+        find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | awk '{print length($0), $0}' | sort -nr | cut -d' ' -f2- | while IFS= read -r dir; do
+            # Check if directory exists (may have been deleted in previous iteration)
+            if [ -d "$dir" ]; then
+                # Get the directory's creation date (birth time)
+                folder_birth_time=$(stat -f "%B" "$dir" 2>/dev/null)
+                current_time=$(date +%s)
+                days_old=$(( (current_time - folder_birth_time) / 86400 ))
+                
+                # Only process directories older than 4 days
+                if [ "$days_old" -gt 3 ]; then
+                    dir_birth_date=$(stat -f "%SB" -t "%Y-%m-%d" "$dir" 2>/dev/null)
+                    
+                    # Check if directory is empty or contains only old files
+                    file_count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+                    new_file_count=$(find "$dir" -maxdepth 1 -type f ! -mtime +3 | wc -l | tr -d ' ')
+                    subdir_count=$(find "$dir" -maxdepth 1 -type d ! -path "$dir" | wc -l | tr -d ' ')
+                    
+                    # If no subdirectories and no new files, we can delete this folder
+                    if [ "$subdir_count" -eq 0 ] && [ "$new_file_count" -eq 0 ]; then
+                        echo "Old folder: $(basename "$dir") (created: $dir_birth_date)"
+                        if rmdir "$dir" 2>/dev/null; then
+                            echo "  Status: DELETED (old folder with no recent content)"
+                            ((deleted_folder_count++))
+                            ((folders_deleted_this_pass++))
+                        else
+                            # Try to remove any remaining old files first
+                            if [ "$file_count" -gt 0 ]; then
+                                find "$dir" -maxdepth 1 -type f -mtime +3 -exec rm {} \;
+                                # Try rmdir again
+                                if rmdir "$dir" 2>/dev/null; then
+                                    echo "  Status: DELETED (after removing remaining old files)"
+                                    ((deleted_folder_count++))
+                                    ((folders_deleted_this_pass++))
+                                else
+                                    echo "  Status: KEPT (contains files that couldn't be deleted)"
+                                fi
+                            else
+                                echo "  Status: FAILED to delete (permission issue or special files)"
+                            fi
+                        fi
+                    fi
                 fi
-            else
-                echo "Empty folder: $(basename "$dir") (created: $dir_birth_date)"
-                echo "  Status: KEPT (created within 4 days)"
             fi
-        fi
+        done
+        
+        ((pass++))
     done
+    
+    if [ $pass -gt $max_passes ]; then
+        echo "Reached maximum cleanup passes ($max_passes). Some nested folders may remain."
+    fi
 fi
 
 # Summary
