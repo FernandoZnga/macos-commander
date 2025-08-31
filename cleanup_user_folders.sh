@@ -117,6 +117,17 @@ delete_candidate_count=0
 delete_folder_candidate_count=0
 deleted_file_count=0
 deleted_folder_count=0
+deleted_junk_file_count=0
+
+# Define junk files that should be deleted immediately and excluded from folder analysis
+# These are system/application files that regular users don't see or care about
+JUNK_FILES=(
+    ".DS_Store"
+    "Thumbs.db"
+    "desktop.ini"
+    "._.DS_Store"
+    "__MACOSX"
+)
 
 # Count folders and files
 if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
@@ -219,6 +230,36 @@ echo "$FILE_LIST" | while IFS= read -r -d '' file; do
     echo ""
 done
 
+# Clean up junk files immediately (regardless of age)
+echo "Cleaning up system junk files..."
+for junk_pattern in "${JUNK_FILES[@]}"; do
+    if [ $INCLUDE_SUBFOLDERS -eq 0 ]; then
+        # Only check directly in the target folder
+        find "$TARGET_DIR" -maxdepth 1 -name "$junk_pattern" -type f -print0 | while IFS= read -r -d '' junk_file; do
+            echo "Junk file: $(basename "$junk_file")"
+            if [ $DELETE_MODE -eq 1 ]; then
+                rm "$junk_file"
+                echo "  Status: DELETED (system junk)"
+                ((deleted_junk_file_count++))
+            else
+                echo "  Status: Would be deleted (system junk)"
+            fi
+        done
+    else
+        # Check recursively in all subdirectories
+        find "$TARGET_DIR" -name "$junk_pattern" -type f -print0 | while IFS= read -r -d '' junk_file; do
+            echo "Junk file: $(basename "$junk_file")"
+            if [ $DELETE_MODE -eq 1 ]; then
+                rm "$junk_file"
+                echo "  Status: DELETED (system junk)"
+                ((deleted_junk_file_count++))
+            else
+                echo "  Status: Would be deleted (system junk)"
+            fi
+        done
+    fi
+done
+
 # Check folders that would be cleaned up in TEST mode (only if subfolders included)
 if [ $DELETE_MODE -eq 0 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
     echo "Checking for folders that would be cleaned up..."
@@ -233,28 +274,57 @@ if [ $DELETE_MODE -eq 0 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
         
         # Check if directory is older than 4 days by creation date
         if [ "$days_old" -gt 3 ]; then
-            # Determine what would happen to this folder
-            file_count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
-            new_file_count=$(find "$dir" -maxdepth 1 -type f ! -mtime +3 | wc -l | tr -d ' ')
+            # Count files excluding junk files
+            total_files=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+            junk_file_count=0
+            for junk_pattern in "${JUNK_FILES[@]}"; do
+                junk_file_count=$((junk_file_count + $(find "$dir" -maxdepth 1 -name "$junk_pattern" -type f | wc -l | tr -d ' ')))
+            done
+            
+            # Calculate non-junk files
+            file_count=$((total_files - junk_file_count))
+            new_file_count=0
+            if [ "$file_count" -gt 0 ]; then
+                # Count new non-junk files
+                for file in "$dir"/*; do
+                    if [ -f "$file" ]; then
+                        is_junk=0
+                        basename_file=$(basename "$file")
+                        for junk_pattern in "${JUNK_FILES[@]}"; do
+                            if [[ "$basename_file" == $junk_pattern ]]; then
+                                is_junk=1
+                                break
+                            fi
+                        done
+                        if [ "$is_junk" -eq 0 ]; then
+                            # Check if file is newer than 4 days
+                            if ! find "$file" -mtime +3 -print | grep -q .; then
+                                ((new_file_count++))
+                            fi
+                        fi
+                    fi
+                done
+            fi
+            
             subdir_count=$(find "$dir" -maxdepth 1 -type d ! -path "$dir" | wc -l | tr -d ' ')
             
             echo "Folder: $(basename "$dir") (created: $dir_birth_date)"
             echo "  Path: $dir"
             
             # Show folder contents for debugging
-            if [ "$file_count" -gt 0 ]; then
-                echo "  Files: $file_count (new: $new_file_count, old: $(( file_count - new_file_count )))"
+            if [ "$total_files" -gt 0 ]; then
+                echo "  Files: $total_files total ($junk_file_count junk, $file_count real, $new_file_count new)"
             fi
             if [ "$subdir_count" -gt 0 ]; then
                 echo "  Subdirectories: $subdir_count"
             fi
             
-            # Determine status
+            # Determine status (now based on non-junk files)
             if [ "$subdir_count" -eq 0 ] && [ "$new_file_count" -eq 0 ]; then
                 if [ "$file_count" -eq 0 ]; then
-                    echo "  Status: Would be deleted (already empty)"
+                    echo "  Status: Would be deleted (empty or contains only junk files)"
                 else
-                    echo "  Status: Would be deleted (contains only old files)"
+                    echo "  Status: Would be deleted (contains only old files and junk)"
                 fi
             else
                 echo "  Status: Would be processed in hierarchical cleanup"
@@ -290,22 +360,58 @@ if [ $DELETE_MODE -eq 1 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
                 if [ "$days_old" -gt 3 ]; then
                     dir_birth_date=$(stat -f "%SB" -t "%Y-%m-%d" "$dir" 2>/dev/null)
                     
-                    # Check if directory is empty or contains only old files
-                    file_count=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
-                    new_file_count=$(find "$dir" -maxdepth 1 -type f ! -mtime +3 | wc -l | tr -d ' ')
+                    # Count files excluding junk files
+                    total_files=$(find "$dir" -maxdepth 1 -type f | wc -l | tr -d ' ')
+                    junk_file_count=0
+                    for junk_pattern in "${JUNK_FILES[@]}"; do
+                        junk_file_count=$((junk_file_count + $(find "$dir" -maxdepth 1 -name "$junk_pattern" -type f | wc -l | tr -d ' ')))
+                    done
+                    
+                    # Calculate non-junk files
+                    real_file_count=$((total_files - junk_file_count))
+                    real_new_file_count=0
+                    if [ "$real_file_count" -gt 0 ]; then
+                        # Count new non-junk files
+                        for file in "$dir"/*; do
+                            if [ -f "$file" ]; then
+                                is_junk=0
+                                basename_file=$(basename "$file")
+                                for junk_pattern in "${JUNK_FILES[@]}"; do
+                                    if [[ "$basename_file" == $junk_pattern ]]; then
+                                        is_junk=1
+                                        break
+                                    fi
+                                done
+                                if [ "$is_junk" -eq 0 ]; then
+                                    # Check if file is newer than 4 days
+                                    if ! find "$file" -mtime +3 -print | grep -q .; then
+                                        ((real_new_file_count++))
+                                    fi
+                                fi
+                            fi
+                        done
+                    fi
+                    
                     subdir_count=$(find "$dir" -maxdepth 1 -type d ! -path "$dir" | wc -l | tr -d ' ')
                     
-                    # If no subdirectories and no new files, we can delete this folder
-                    if [ "$subdir_count" -eq 0 ] && [ "$new_file_count" -eq 0 ]; then
+                    # If no subdirectories and no new non-junk files, we can delete this folder
+                    if [ "$subdir_count" -eq 0 ] && [ "$real_new_file_count" -eq 0 ]; then
                         echo "Old folder: $(basename "$dir") (created: $dir_birth_date)"
+                        
+                        # First remove any junk files
+                        for junk_pattern in "${JUNK_FILES[@]}"; do
+                            find "$dir" -maxdepth 1 -name "$junk_pattern" -type f -exec rm {} \; 2>/dev/null
+                        done
+                        
+                        # Then try to remove the directory
                         if rmdir "$dir" 2>/dev/null; then
-                            echo "  Status: DELETED (old folder with no recent content)"
+                            echo "  Status: DELETED (old folder with no recent non-junk content)"
                             ((deleted_folder_count++))
                             ((folders_deleted_this_pass++))
                         else
-                            # Try to remove any remaining old files first
-                            if [ "$file_count" -gt 0 ]; then
-                                find "$dir" -maxdepth 1 -type f -mtime +3 -exec rm {} \;
+                            # Try to remove any remaining old files
+                            if [ "$real_file_count" -gt 0 ]; then
+                                find "$dir" -maxdepth 1 -type f -mtime +3 -exec rm {} \; 2>/dev/null
                                 # Try rmdir again
                                 if rmdir "$dir" 2>/dev/null; then
                                     echo "  Status: DELETED (after removing remaining old files)"
@@ -338,6 +444,7 @@ if [ $DELETE_MODE -eq 1 ]; then
     echo "Total files found: $total_file_count"
     echo "Hidden files found: $hidden_file_count"
     echo "Files deleted: $deleted_file_count"
+    echo "Junk files deleted: $deleted_junk_file_count"
     echo "Empty folders deleted: $deleted_folder_count"
 else
     echo "Summary:"
