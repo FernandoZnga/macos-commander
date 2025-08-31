@@ -3,25 +3,27 @@
 # cleanup_user_folders.sh
 # 
 # Purpose: List and optionally delete files from the Desktop or Downloads folder that are 
-#          older than or equal to 4 days.
+#          older than or equal to 4 days. When --include-subfolders is used, also removes
+#          empty folders that are older than 4 days.
 #
 # Usage: ./cleanup_user_folders.sh [OPTIONS]
 #        Options:
 #          --target VALUE        Target folder to clean: 'desktop' or 'downloads' (REQUIRED)
 #          --delete              Delete files (if not specified, files will only be listed)
-#          --include-subfolders  Include files in subfolders (by default, only files directly
-#                               in the target folder are processed)
+#          --include-subfolders  Include files in subfolders and check for empty folders to delete
+#                               (by default, only files directly in the target folder are processed)
 #          --help                Display this help message
 
 # Display help/usage information
 show_help() {
     echo "Clean up user folders by listing or deleting files older than 4 days."
+    echo "When --include-subfolders is used, also removes empty folders older than 4 days."
     echo ""
     echo "Usage: ./cleanup_user_folders.sh [OPTIONS]"
     echo "Options:"
     echo "  --target VALUE        Target folder to clean: 'desktop' or 'downloads' (REQUIRED)"
     echo "  --delete              Delete files (if not specified, files will only be listed)"
-    echo "  --include-subfolders  Include files in subfolders"
+    echo "  --include-subfolders  Include files in subfolders and empty folder cleanup"
     echo "  --help                Display this help message"
     echo ""
     echo "Examples:"
@@ -30,6 +32,7 @@ show_help() {
     echo "  ./cleanup_user_folders.sh --target desktop --delete   # Delete files from Desktop"
     echo "  ./cleanup_user_folders.sh --target downloads --delete --include-subfolders"
     echo "                                                        # Delete files from Downloads including subfolders"
+    echo "                                                        # and empty folders older than 4 days"
     echo ""
     exit 0
 }
@@ -110,6 +113,7 @@ folder_count=0
 total_file_count=0
 hidden_file_count=0
 delete_candidate_count=0
+delete_folder_candidate_count=0
 deleted_file_count=0
 deleted_folder_count=0
 
@@ -120,12 +124,23 @@ if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
     total_file_count=$(find "$TARGET_DIR" -type f | wc -l | tr -d ' ')
     hidden_file_count=$(find "$TARGET_DIR" -type f -name ".*" | wc -l | tr -d ' ')
     delete_candidate_count=$(find "$TARGET_DIR" -type f -mtime +3 | wc -l | tr -d ' ')
+    
+    # Count empty folders older than 4 days that would be deleted
+    delete_folder_candidate_count=0
+    while IFS= read -r dir; do
+        if [ -n "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            if find "$dir" -maxdepth 0 -type d -mtime +3 -print | grep -q .; then
+                ((delete_folder_candidate_count++))
+            fi
+        fi
+    done < <(find "$TARGET_DIR" -type d ! -path "$TARGET_DIR")
 else
     # Same logic, excluding the root directory from folder count
     folder_count=$(find "$TARGET_DIR" -maxdepth 1 -type d ! -path "$TARGET_DIR" | wc -l | tr -d ' ')
     total_file_count=$(find "$TARGET_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')
     hidden_file_count=$(find "$TARGET_DIR" -maxdepth 1 -type f -name ".*" | wc -l | tr -d ' ')
     delete_candidate_count=$(find "$TARGET_DIR" -maxdepth 1 -type f -mtime +3 | wc -l | tr -d ' ')
+    delete_folder_candidate_count=0
 fi
 
 # Display mode info
@@ -134,6 +149,9 @@ if [ $DELETE_MODE -eq 1 ]; then
     echo "Total files found: $total_file_count"
     echo "Hidden files found: $hidden_file_count"
     echo "Files eligible for deletion: $delete_candidate_count"
+    if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
+        echo "Empty folders eligible for deletion: $delete_folder_candidate_count"
+    fi
     echo -n "Are you sure you want to proceed? (y/N): "
     read -r response
     if [[ ! "$response" =~ ^[yY]$ ]]; then
@@ -146,6 +164,9 @@ else
     echo "Total files found: $total_file_count"
     echo "Hidden files found: $hidden_file_count"
     echo "Files that would be deleted (older than 4 days): $delete_candidate_count"
+    if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
+        echo "Empty folders that would be deleted (older than 4 days): $delete_folder_candidate_count"
+    fi
 fi
 
 if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
@@ -190,12 +211,53 @@ echo "$FILE_LIST" | while IFS= read -r -d '' file; do
     echo ""
 done
 
+# Check empty folders in TEST mode (only if subfolders included)
+if [ $DELETE_MODE -eq 0 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
+    echo "Checking for empty folders that would be deleted..."
+    
+    # Find all directories (excluding the root target directory)
+    find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | while IFS= read -r dir; do
+        # Check if directory is empty
+        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            # Get the directory's modification date
+            dir_mod_date=$(stat -f "%Sm" -t "%Y-%m-%d" "$dir" 2>/dev/null)
+            
+            # Check if directory is older than 4 days using find
+            if find "$dir" -maxdepth 0 -type d -mtime +3 -print | grep -q .; then
+                echo "Empty folder: $(basename "$dir") (modified: $dir_mod_date)"
+                echo "  Status: Would be deleted (empty and older than 4 days)"
+            else
+                echo "Empty folder: $(basename "$dir") (modified: $dir_mod_date)"
+                echo "  Status: Would be kept (newer than 4 days)"
+            fi
+        fi
+    done
+fi
+
 # Remove empty folders in DELETE mode (only if subfolders included)
 if [ $DELETE_MODE -eq 1 ] && [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
-    EMPTY_FOLDERS=$(find "$TARGET_DIR" -type d -empty -print0)
-    echo "$EMPTY_FOLDERS" | while IFS= read -r -d '' dir; do
-        if [ "$dir" != "$TARGET_DIR" ]; then
-            rmdir "$dir" && ((deleted_folder_count++))
+    echo "Checking for empty folders older than 4 days..."
+    
+    # Find all directories (excluding the root target directory)
+    find "$TARGET_DIR" -type d ! -path "$TARGET_DIR" | while IFS= read -r dir; do
+        # Check if directory is empty
+        if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            # Get the directory's modification date
+            dir_mod_date=$(stat -f "%Sm" -t "%Y-%m-%d" "$dir" 2>/dev/null)
+            
+            # Check if directory is older than 4 days using find
+            if find "$dir" -maxdepth 0 -type d -mtime +3 -print | grep -q .; then
+                echo "Empty folder: $(basename "$dir") (modified: $dir_mod_date)"
+                if rmdir "$dir" 2>/dev/null; then
+                    echo "  Status: DELETED (empty and older than 4 days)"
+                    ((deleted_folder_count++))
+                else
+                    echo "  Status: FAILED to delete (may not be empty or permission issue)"
+                fi
+            else
+                echo "Empty folder: $(basename "$dir") (modified: $dir_mod_date)"
+                echo "  Status: KEPT (newer than 4 days)"
+            fi
         fi
     done
 fi
@@ -214,6 +276,9 @@ else
     echo "Total files counted: $total_file_count"
     echo "Hidden files found: $hidden_file_count"
     echo "Files that would be deleted: $delete_candidate_count"
+    if [ $INCLUDE_SUBFOLDERS -eq 1 ]; then
+        echo "Empty folders that would be deleted: $delete_folder_candidate_count"
+    fi
     echo "No files were deleted in test mode."
     echo "----------------------------"
     echo "Listing files is completed."
